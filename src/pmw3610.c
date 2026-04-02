@@ -90,12 +90,12 @@ static int pmw3610_write(const struct device *dev, uint8_t reg, uint8_t val) {
     if (unlikely(err != 0)) {
         return err;
     }
-    
+
     pmw3610_write_reg(dev, PMW3610_REG_SPI_CLK_ON_REQ, PMW3610_SPI_CLOCK_CMD_DISABLE);
     return 0;
 }
 
-static int pmw3610_set_cpi(const struct device *dev, uint32_t cpi, 
+static int pmw3610_set_cpi(const struct device *dev, uint32_t cpi,
                            bool swap_xy, bool inv_x, bool inv_y) {
     /* Set resolution with CPI step of 200 cpi
      * 0x1: 200 cpi (minimum cpi)
@@ -119,29 +119,17 @@ static int pmw3610_set_cpi(const struct device *dev, uint32_t cpi,
     uint8_t cpi_val = cpi / 200;
     value = (value & 0xE0) | (cpi_val & 0x1F);
 
-    // Convert axis to register value
-    // Set prefered RES_STEP
+    // Hardware axis configuration (applied at sensor level, before software rotation)
     //   BIT 7: SWAP_XY
     //   BIT 6: INV_X
     //   BIT 5: INV_Y
-    LOG_INF("Setting axis swap_xy: %s inv_x: %s inv_y: %s", 
+    // Note: CONFIG_PMW3610_ALT_SWAP_XY/INVERT_X/Y apply SOFTWARE transforms after rotation.
+    //       Use DTS swap-xy/invert-x/invert-y for hardware-level pre-rotation inversion.
+    LOG_INF("Hardware axis: swap_xy=%s inv_x=%s inv_y=%s",
             swap_xy ? "yes" : "no", inv_x ? "yes" : "no", inv_y ? "yes" : "no");
-
-#if IS_ENABLED(CONFIG_PMW3610_ALT_SWAP_XY)
-    value |= (1 << 7);
-#else
     if (swap_xy) { value |= (1 << 7); } else { value &= ~(1 << 7); }
-#endif
-#if IS_ENABLED(CONFIG_PMW3610_ALT_INVERT_X)
-    value |= (1 << 6);
-#else
-    if (inv_x) { value |= (1 << 6); } else { value &= ~(1 << 6); }
-#endif
-#if IS_ENABLED(CONFIG_PMW3610_ALT_INVERT_Y)
-    value |= (1 << 5);
-#else
-    if (inv_y) { value |= (1 << 5); } else { value &= ~(1 << 5); }
-#endif
+    if (inv_x)   { value |= (1 << 6); } else { value &= ~(1 << 6); }
+    if (inv_y)   { value |= (1 << 5); } else { value &= ~(1 << 5); }
 
     LOG_INF("Setting CPI to %u (reg value 0x%x)", cpi, value);
 
@@ -264,7 +252,7 @@ static int pmw3610_set_performance(const struct device *dev, bool enabled) {
         }
         LOG_INF("Get performance register (reg value 0x%x)", value);
 
-        // Set prefered RUN RATE        
+        // Set prefered RUN RATE
         //   BIT 3:   VEL_RUNRATE    0x0: 8ms; 0x1 4ms;
         //   BIT 2:   POSHI_RUN_RATE 0x0: 8ms; 0x1 4ms;
         //   BIT 1-0: POSLO_RUN_RATE 0x0: 8ms; 0x1 4ms; 0x2 2ms; 0x4 Reserved
@@ -422,6 +410,34 @@ static void pmw3610_async_init(struct k_work *work) {
     }
 }
 
+//////// Layer-based orientation and mode detection //////////
+
+// Tracks the orientation layer last active during MOVE mode.
+// Updated only when in MOVE mode so that scroll/snipe layers don't change the orientation.
+static uint8_t last_orientation_layer = 0;
+
+static enum pixart_input_mode get_input_mode_for_current_layer(const struct device *dev) {
+    const struct pixart_config *config = dev->config;
+    uint8_t curr_layer = zmk_keymap_highest_layer_active();
+    for (size_t i = 0; i < config->scroll_layers_len; i++) {
+        if (curr_layer == (uint8_t)config->scroll_layers[i]) {
+            return SCROLL;
+        }
+    }
+    for (size_t i = 0; i < config->snipe_layers_len; i++) {
+        if (curr_layer == (uint8_t)config->snipe_layers[i]) {
+            return SNIPE;
+        }
+    }
+    return MOVE;
+}
+
+//////// Motion reporting //////////
+
+// 12-bit two's complement value to int16_t
+// adapted from https://stackoverflow.com/questions/70802306/convert-a-12-bit-signed-number-in-c
+#define TOINT16(val, bits) (((struct { int16_t value : bits; }){val}).value)
+
 static int pmw3610_report_data(const struct device *dev) {
     struct pixart_data *data = dev->data;
     const struct pixart_config *config = dev->config;
@@ -430,6 +446,24 @@ static int pmw3610_report_data(const struct device *dev) {
     if (unlikely(!data->ready)) {
         LOG_WRN("Device is not initialized yet");
         return -EBUSY;
+    }
+
+    // Determine input mode from active layer
+    enum pixart_input_mode input_mode = get_input_mode_for_current_layer(dev);
+    uint8_t current_layer = zmk_keymap_highest_layer_active();
+
+    // Only update orientation when in MOVE mode; scroll/snipe layers preserve last orientation
+    if (input_mode == MOVE) {
+        last_orientation_layer = current_layer;
+    }
+
+    // Switch CPI based on input mode
+    uint32_t target_cpi = (input_mode == SNIPE && config->snipe_cpi > 0)
+                          ? config->snipe_cpi
+                          : config->cpi;
+    if (data->curr_cpi != target_cpi) {
+        pmw3610_set_cpi(dev, target_cpi, config->swap_xy, config->inv_x, config->inv_y);
+        data->curr_cpi = target_cpi;
     }
 
     static int64_t dx = 0;
@@ -445,18 +479,13 @@ static int pmw3610_report_data(const struct device *dev) {
     if (err) {
         return err;
     }
-    // LOG_HEXDUMP_DBG(buf, PMW3610_BURST_SIZE, "buf");
 
-// 12-bit two's complement value to int16_t
-// adapted from https://stackoverflow.com/questions/70802306/convert-a-12-bit-signed-number-in-c
-#define TOINT16(val, bits) (((struct { int16_t value : bits; }){val}).value)
-
-    int16_t x = TOINT16((buf[PMW3610_X_L_POS] + ((buf[PMW3610_XY_H_POS] & 0xF0) << 4)), 12);
-    int16_t y = TOINT16((buf[PMW3610_Y_L_POS] + ((buf[PMW3610_XY_H_POS] & 0x0F) << 8)), 12);
-    LOG_DBG("x/y: %d/%d", x, y);
+    int16_t raw_x = TOINT16((buf[PMW3610_X_L_POS] + ((buf[PMW3610_XY_H_POS] & 0xF0) << 4)), 12);
+    int16_t raw_y = TOINT16((buf[PMW3610_Y_L_POS] + ((buf[PMW3610_XY_H_POS] & 0x0F) << 8)), 12);
+    LOG_DBG("raw x/y: %d/%d layer: %d", raw_x, raw_y, last_orientation_layer);
 
 #ifdef CONFIG_PMW3610_ALT_SMART_ALGORITHM
-    int16_t shutter = ((int16_t)(buf[PMW3610_SHUTTER_H_POS] & 0x01) << 8) 
+    int16_t shutter = ((int16_t)(buf[PMW3610_SHUTTER_H_POS] & 0x01) << 8)
                     + buf[PMW3610_SHUTTER_L_POS];
     if (data->sw_smart_flag && shutter < 45) {
         pmw3610_write(dev, 0x32, 0x00);
@@ -467,6 +496,56 @@ static int pmw3610_report_data(const struct device *dev) {
         data->sw_smart_flag = true;
     }
 #endif
+
+    // Apply layer-based rotation transform.
+    // Layer 0 = 0°, Layer 1 = 45°, ..., Layer 7 = 315°.
+    // This allows the Nape to be held in 8 different orientations.
+    int16_t x;
+    int16_t y;
+    switch (last_orientation_layer) {
+    case 1: // 45°
+        x = ((raw_x + raw_y) * 100) / 141;
+        y = ((raw_y - raw_x) * 100) / 141;
+        break;
+    case 2: // 90°
+        x = raw_y;
+        y = -raw_x;
+        break;
+    case 3: // 135°
+        x = ((raw_y - raw_x) * 100) / 141;
+        y = -((raw_x + raw_y) * 100) / 141;
+        break;
+    case 4: // 180°
+        x = -raw_x;
+        y = -raw_y;
+        break;
+    case 5: // 225°
+        x = -((raw_x + raw_y) * 100) / 141;
+        y = -((raw_y - raw_x) * 100) / 141;
+        break;
+    case 6: // 270°
+        x = -raw_y;
+        y = raw_x;
+        break;
+    case 7: // 315°
+        x = -((raw_y - raw_x) * 100) / 141;
+        y = ((raw_x + raw_y) * 100) / 141;
+        break;
+    default: // 0° (layer 0 or any unrecognized layer)
+        x = raw_x;
+        y = raw_y;
+        break;
+    }
+
+    // Software post-rotation axis inversion.
+    // Applied after the rotation transform, unlike the hardware inv_x/inv_y (pre-rotation).
+    // Use CONFIG_PMW3610_ALT_INVERT_X/Y in nape.conf to match physical wiring orientation.
+    if (IS_ENABLED(CONFIG_PMW3610_ALT_INVERT_X)) {
+        x = -x;
+    }
+    if (IS_ENABLED(CONFIG_PMW3610_ALT_INVERT_Y)) {
+        y = -y;
+    }
 
 #if CONFIG_PMW3610_ALT_REPORT_INTERVAL_MIN > 0
     // purge accumulated delta, if last sampled had not been reported on last report tick
@@ -482,7 +561,7 @@ static int pmw3610_report_data(const struct device *dev) {
     dy += y;
 
 #if CONFIG_PMW3610_ALT_REPORT_INTERVAL_MIN > 0
-    // strict to report inerval
+    // strict to report interval
     if (now - last_rpt_time < CONFIG_PMW3610_ALT_REPORT_INTERVAL_MIN) {
         return 0;
     }
@@ -568,8 +647,19 @@ static int pmw3610_init(const struct device *dev) {
     // init device pointer
     data->dev = dev;
 
-    // init smart algorithm flag;
+    // init smart algorithm flag
     data->sw_smart_flag = false;
+
+    // init CPI tracking to normal CPI
+    data->curr_cpi = config->cpi;
+
+    // Initialize orientation layer and optionally activate it in the keymap.
+    // This lets the keyboard boot into a known physical orientation.
+    last_orientation_layer = config->default_orientation_layer;
+    if (config->default_orientation_layer > 0) {
+        LOG_INF("Activating default orientation layer %d", config->default_orientation_layer);
+        zmk_keymap_layer_activate(config->default_orientation_layer, false);
+    }
 
     // init trigger handler work
     k_work_init(&data->trigger_work, pmw3610_work_callback);
@@ -611,6 +701,9 @@ static int pmw3610_alt_attr_set(const struct device *dev, enum sensor_channel ch
     case PMW3610_ALT_ATTR_CPI:
         err = pmw3610_set_cpi(dev, PMW3610_SVALUE_TO_CPI(*val),
                               config->swap_xy, config->inv_x, config->inv_y);
+        if (!err) {
+            data->curr_cpi = PMW3610_SVALUE_TO_CPI(*val);
+        }
         break;
 
     case PMW3610_ALT_ATTR_RUN_DOWNSHIFT_TIME:
@@ -649,29 +742,18 @@ static const struct sensor_driver_api pmw3610_driver_api = {
     .attr_set = pmw3610_alt_attr_set,
 };
 
-// #if IS_ENABLED(CONFIG_PM_DEVICE)
-// static int pmw3610_pm_action(const struct device *dev, enum pm_device_action action) {
-//     switch (action) {
-//     case PM_DEVICE_ACTION_SUSPEND:
-//         return pmw3610_set_interrupt(dev, false);
-//     case PM_DEVICE_ACTION_RESUME:
-//         return pmw3610_set_interrupt(dev, true);
-//     default:
-//         return -ENOTSUP;
-//     }
-// }
-// #endif // IS_ENABLED(CONFIG_PM_DEVICE)
-// PM_DEVICE_DT_INST_DEFINE(n, pmw3610_pm_action);
-
 #define PMW3610_SPI_MODE (SPI_OP_MODE_MASTER | SPI_WORD_SET(8) | SPI_MODE_CPOL | \
                         SPI_MODE_CPHA | SPI_TRANSFER_MSB)
 
 #define PMW3610_DEFINE(n)                                                                          \
     static struct pixart_data data##n;                                                             \
+    static int32_t scroll_layers##n[] = DT_PROP(DT_DRV_INST(n), scroll_layers);                   \
+    static int32_t snipe_layers##n[]  = DT_PROP(DT_DRV_INST(n), snipe_layers);                    \
     static const struct pixart_config config##n = {                                                \
 		.spi = SPI_DT_SPEC_INST_GET(n, PMW3610_SPI_MODE, 0),		                               \
         .irq_gpio = GPIO_DT_SPEC_INST_GET(n, irq_gpios),                                           \
         .cpi = DT_PROP(DT_DRV_INST(n), cpi),                                                       \
+        .snipe_cpi = DT_PROP(DT_DRV_INST(n), snipe_cpi),                                           \
         .swap_xy = DT_PROP(DT_DRV_INST(n), swap_xy),                                               \
         .inv_x = DT_PROP(DT_DRV_INST(n), invert_x),                                                \
         .inv_y = DT_PROP(DT_DRV_INST(n), invert_y),                                                \
@@ -680,6 +762,11 @@ static const struct sensor_driver_api pmw3610_driver_api = {
         .y_input_code = DT_PROP(DT_DRV_INST(n), y_input_code),                                     \
         .force_awake = DT_PROP(DT_DRV_INST(n), force_awake),                                       \
         .force_awake_4ms_mode = DT_PROP(DT_DRV_INST(n), force_awake_4ms_mode),                     \
+        .scroll_layers = scroll_layers##n,                                                         \
+        .scroll_layers_len = DT_PROP_LEN(DT_DRV_INST(n), scroll_layers),                           \
+        .snipe_layers = snipe_layers##n,                                                           \
+        .snipe_layers_len = DT_PROP_LEN(DT_DRV_INST(n), snipe_layers),                             \
+        .default_orientation_layer = DT_PROP(DT_DRV_INST(n), default_orientation_layer),           \
     };                                                                                             \
     DEVICE_DT_INST_DEFINE(n, pmw3610_init, NULL, &data##n, &config##n, POST_KERNEL,                \
                           CONFIG_INPUT_PMW3610_INIT_PRIORITY, &pmw3610_driver_api);
