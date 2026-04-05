@@ -1,0 +1,14 @@
+# Copyright (c) 2026 Tano Karbou (github: karbou12 / X: @karbou_12)
+# SPDX-License-Identifier: MIT
+
+description: PMW3610 trackball cw/ccw rotation behavior
+
+compatible: "zmk,behavior-pmw3610-rotation"
+
+include: one_param.yaml
+
+properties:
+  step-angle-degree:
+    description: the step of the rotation angle of the device, the range is from 3 to 45.
+    type: int
+    default: 45

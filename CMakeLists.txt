@@ -1,4 +1,7 @@
 zephyr_library()
 
 zephyr_library_sources_ifdef(CONFIG_PMW3610_ALT src/pmw3610.c)
-zephyr_include_directories(${APPLICATION_SOURCE_DIR}/include)
+zephyr_include_directories_ifdef(CONFIG_PMW3610_ALT ${APPLICATION_SOURCE_DIR}/include)
+
+zephyr_library_sources_ifdef(CONFIG_ZMK_BEHAVIOR_PMW3610_ROTATION src/behaviors/behavior_pmw3610_rotation.c)
+zephyr_include_directories_ifdef(CONFIG_ZMK_BEHAVIOR_PMW3610_ROTATION include)

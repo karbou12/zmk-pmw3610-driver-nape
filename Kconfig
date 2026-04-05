@@ -106,6 +106,34 @@ config PMW3610_ALT_REST3_SAMPLE_TIME_MS
     help
       Default REST2 mode sample period in millisecond.
 
+config PMW3610_ALT_TRABO_SHIFT
+    bool "Enable PMW3610 TraboShift"
+    default n
+    help
+      Enable TraboShift: OctaShift by Tracking Ball.
+
+config PMW3610_ALT_TRABO_SHIFT_SAMPLE_TIME_MS
+    int "Sample time for TraboShift"
+    default 100
+
+config PMW3610_ALT_TRABO_SHIFT_DISTANCE_THRESHOLD
+    int "Threshold of distance for TraboShift"
+    default 1000
+
+config PMW3610_ALT_TRABO_SHIFT_LAYER
+    int "Layer to enable TraboShift"
+    default 12
+
+config PMW3610_ALT_TRABO_SHIFT_ANGLE
+    int "Angle of each direction for TraboShift"
+    default 45
+    # range 3 45
+
+config ZMK_BEHAVIOR_PMW3610_ROTATION
+    bool "PMW3610 rotation behavior"
+    default n
+    depends on DT_HAS_ZMK_BEHAVIOR_PMW3610_ROTATION_ENABLED
+
 module = PMW3610_ALT
 module-str = PMW3610_ALT
 source "${ZEPHYR_BASE}/subsys/logging/Kconfig.template.log_config"
