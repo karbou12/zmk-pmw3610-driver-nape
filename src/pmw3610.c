@@ -12,6 +12,10 @@
 #include <zephyr/pm/device.h>
 #include <zmk/keymap.h>
 #include <zmk/events/activity_state_changed.h>
+#include <math.h>
+#ifndef M_PI
+#define M_PI 3.1415926536
+#endif
 #include "pmw3610.h"
 
 #include <zephyr/logging/log.h>
@@ -416,6 +420,206 @@ static void pmw3610_async_init(struct k_work *work) {
 // Updated only when in MOVE mode so that scroll/snipe layers don't change the orientation.
 static uint8_t last_orientation_layer = 0;
 
+#ifdef CONFIG_PMW3610_ALT_TRABO_SHIFT
+
+static int8_t prev_direction = -1;
+static uint8_t direction_degree = 0;
+
+static uint16_t calc_degree_for_direction() {
+    return (prev_direction == -1) ? last_orientation_layer * 45 : prev_direction * direction_degree;
+}
+
+static uint16_t calc_degree_in_range(const int16_t degree) {
+    const int16_t mod = degree % 360;
+    return (mod >= 0) ? mod : mod + 360;
+}
+
+static int8_t rotate_device(const bool is_cw) {
+    const uint8_t max_direction = 360 / direction_degree;
+    const uint8_t cur_direction = (prev_direction != -1) ? prev_direction
+        : (uint8_t)(last_orientation_layer * (max_direction / 8.0));
+    const int8_t next_direction = is_cw ? cur_direction + 1 : cur_direction - 1;
+
+    prev_direction = (next_direction < 0) ? max_direction - 1
+        : (max_direction <= next_direction) ? 0
+        : next_direction;
+    LOG_INF("rotate direction %d -> %d", cur_direction, prev_direction);
+    return prev_direction;
+}
+
+uint8_t calc_step_angle_degree_in_range(const uint8_t step_angle_degree) {
+    const uint8_t min_angle = 3;
+    const uint8_t max_angle = 45;
+    uint8_t calc_angle = step_angle_degree;
+
+    if (calc_angle < min_angle) {
+        calc_angle = min_angle;
+    } else if (max_angle < calc_angle) {
+        calc_angle = max_angle;
+    }
+
+    while (360 % calc_angle != 0) {
+        calc_angle++;
+    }
+
+    if (step_angle_degree != calc_angle) {
+        LOG_WRN("step angle is changed from %u to %u [degrees].", step_angle_degree, calc_angle);
+    }
+
+    return calc_angle;
+}
+
+void rotate_device_with_step(const int8_t step_angle_degree) {
+    static int8_t sum_angle_degree = 0;
+    static int8_t total = 0;
+
+    static int64_t prev_time = 0;
+    int64_t curr_time = k_uptime_get();
+    const int64_t diff_time = curr_time - prev_time;
+    if ((prev_time == 0) || (diff_time > 3000)) {
+        prev_time = curr_time;
+        sum_angle_degree = 0;
+        total = 0;
+    }
+
+    sum_angle_degree += step_angle_degree;
+    LOG_DBG("%s %d -> %d\n", __FUNCTION__, step_angle_degree, sum_angle_degree);
+
+    bool is_rotate = false;
+    uint8_t count = 0;
+    int8_t tmp_angle_degree = sum_angle_degree;
+
+    if (sum_angle_degree > 0) {
+        // int8_t tmp_angle_degree = sum_angle_degree + direction_degree / 2;
+        while (tmp_angle_degree >= direction_degree) {
+            rotate_device(true);
+            is_rotate = true;
+            count++;
+            total++;
+            tmp_angle_degree -= direction_degree;
+            if (tmp_angle_degree < 0) {
+                tmp_angle_degree = 0;
+            }
+        }
+    } else if (sum_angle_degree < 0) {
+        // int8_t tmp_angle_degree = sum_angle_degree - direction_degree / 2;
+        while (tmp_angle_degree <= -direction_degree) {
+            rotate_device(false);
+            is_rotate = true;
+            count++;
+            total++;
+            tmp_angle_degree += direction_degree;
+            if (tmp_angle_degree > 0) {
+                tmp_angle_degree = 0;
+            }
+        }
+    }
+
+    if (is_rotate) {
+        LOG_DBG("count:%d, total:%d, remain angle:%d\n", count, total, tmp_angle_degree);
+        sum_angle_degree = tmp_angle_degree;
+        return;
+    }
+}
+
+static int8_t detect_direction(const int16_t cur_x, const int16_t cur_y) {
+    static const uint32_t dir_detect_threshold = CONFIG_PMW3610_ALT_TRABO_SHIFT_DISTANCE_THRESHOLD * CONFIG_PMW3610_ALT_TRABO_SHIFT_DISTANCE_THRESHOLD;
+
+    static int16_t x = 0;
+    static int16_t y = 0;
+    static int64_t prev_time = 0;
+
+    int64_t curr_time = k_uptime_get();
+
+    const int64_t diff_time = curr_time - prev_time;
+    if ((prev_time == 0) || (diff_time > CONFIG_PMW3610_ALT_TRABO_SHIFT_SAMPLE_TIME_MS * 2)) {
+        LOG_DBG("detection begin at %lld", curr_time);
+        prev_time = curr_time;
+        x = cur_x;
+        y = cur_y;
+        return prev_direction;
+    }
+
+    x += cur_x;
+    y += cur_y;
+
+    const uint32_t distance = x * x + y * y;
+
+    if (diff_time < CONFIG_PMW3610_ALT_TRABO_SHIFT_SAMPLE_TIME_MS) {
+        LOG_DBG("under detection [dst:%d %d -> %u/%u] [time:%lld - %lld = %lld/%d]",
+                x, y, distance, dir_detect_threshold,
+                curr_time, prev_time, diff_time, CONFIG_PMW3610_ALT_TRABO_SHIFT_SAMPLE_TIME_MS);
+
+        if (distance < dir_detect_threshold) {
+            return prev_direction;
+        }
+    }
+
+    const double radian = atan2(y, x);
+    int16_t degree = (int16_t)(radian * 180 / M_PI);
+
+    LOG_DBG("finish detection [dst:%d %d (degree:%d) -> %u/%u] [time:%lld - %lld = %lld/%d]",
+            x, y, degree, distance, dir_detect_threshold,
+            curr_time, prev_time, diff_time, CONFIG_PMW3610_ALT_TRABO_SHIFT_SAMPLE_TIME_MS);
+
+    prev_time = 0;
+    x = 0;
+    y = 0;
+
+    if (distance < dir_detect_threshold) {
+        return prev_direction;
+    }
+
+    LOG_INF("********** change direction");
+
+    degree -= 270;
+    degree += (int16_t)(direction_degree / 2);
+    degree = calc_degree_in_range(degree);
+    LOG_DBG("corrected degree:%d", degree);
+
+    return (int8_t)(degree / direction_degree);
+}
+
+static void rotate_point(const int16_t raw_x, const int16_t raw_y, const uint16_t degree, int16_t* x, int16_t* y) {
+    // normalize sin table with int16_t max
+    static const int32_t sin_tbl[] = {
+            0,   572,  1144,  1715,  2286,  2856,  3425,  3993,  4560,  5126,
+         5690,  6252,  6813,  7371,  7927,  8481,  9032,  9580, 10126, 10668,
+        11207, 11743, 12275, 12803, 13328, 13848, 14364, 14876, 15383, 15886,
+        16383, 16876, 17364, 17846, 18323, 18794, 19260, 19720, 20173, 20621,
+        21062, 21497, 21925, 22347, 22762, 23170, 23571, 23964, 24351, 24730,
+        25101, 25465, 25821, 26169, 26509, 26841, 27165, 27481, 27788, 28087,
+        28377, 28659, 28932, 29196, 29451, 29697, 29934, 30162, 30381, 30591,
+        30791, 30982, 31163, 31335, 31498, 31650, 31794, 31927, 32051, 32165,
+        32269, 32364, 32448, 32523, 32587, 32642, 32687, 32722, 32747, 32762,
+        32767,
+    };
+    const int32_t SCALER = 32767;
+
+    if (degree < 90) {
+        const uint8_t sin_index = degree;
+        const uint8_t cos_index  = 90 - degree;
+        *x = (int16_t)((  raw_x * sin_tbl[cos_index] + raw_y * sin_tbl[sin_index]) / SCALER);
+        *y = (int16_t)((- raw_x * sin_tbl[sin_index] + raw_y * sin_tbl[cos_index]) / SCALER);
+    } else if (degree < 180) {
+        const uint8_t sin_index = 180 - degree;
+        const uint8_t cos_index  = degree - 90;
+        *x = (int16_t)((- raw_x * sin_tbl[cos_index] + raw_y * sin_tbl[sin_index]) / SCALER);
+        *y = (int16_t)((- raw_x * sin_tbl[sin_index] - raw_y * sin_tbl[cos_index]) / SCALER);
+    } else if (degree < 270) {
+        const uint8_t sin_index = degree - 180;
+        const uint8_t cos_index  = 270 - degree;
+        *x = (int16_t)((- raw_x * sin_tbl[cos_index] - raw_y * sin_tbl[sin_index]) / SCALER);
+        *y = (int16_t)((  raw_x * sin_tbl[sin_index] - raw_y * sin_tbl[cos_index]) / SCALER);
+    } else  {
+        const uint8_t sin_index = 360 - degree;
+        const uint8_t cos_index  = degree - 270;
+        *x = (int16_t)((  raw_x * sin_tbl[cos_index] - raw_y * sin_tbl[sin_index]) / SCALER);
+        *y = (int16_t)((  raw_x * sin_tbl[sin_index] + raw_y * sin_tbl[cos_index]) / SCALER);
+    }
+}
+#endif
+
 static enum pixart_input_mode get_input_mode_for_current_layer(const struct device *dev) {
     const struct pixart_config *config = dev->config;
     uint8_t curr_layer = zmk_keymap_highest_layer_active();
@@ -454,7 +658,13 @@ static int pmw3610_report_data(const struct device *dev) {
 
     // Only update orientation when in MOVE mode; scroll/snipe layers preserve last orientation
     if (input_mode == MOVE) {
-        last_orientation_layer = current_layer;
+#ifdef CONFIG_PMW3610_ALT_TRABO_SHIFT
+        if (current_layer != CONFIG_PMW3610_ALT_TRABO_SHIFT_LAYER) {
+#endif
+            last_orientation_layer = current_layer;
+#ifdef CONFIG_PMW3610_ALT_TRABO_SHIFT
+        }
+#endif
     }
 
     // Switch CPI based on input mode
@@ -497,11 +707,42 @@ static int pmw3610_report_data(const struct device *dev) {
     }
 #endif
 
+#ifdef CONFIG_PMW3610_ALT_TRABO_SHIFT
+    static bool is_direction_changed = false;
+
+    if (input_mode == MOVE) {
+        if (zmk_keymap_highest_layer_active() == CONFIG_PMW3610_ALT_TRABO_SHIFT_LAYER) {
+            if (is_direction_changed) {
+                LOG_DBG("skip to detect direction");
+                return 0;
+            }
+
+            const int8_t detected_direction = detect_direction(raw_x, raw_y);
+            if (prev_direction != detected_direction) {
+                LOG_INF("direction %d -> %d", prev_direction, detected_direction);
+                prev_direction = detected_direction;
+                is_direction_changed = true;
+            }
+
+            return 0;
+        } else if (is_direction_changed) {
+            LOG_DBG("reset is_direction_changed");
+            is_direction_changed = false;
+        }
+    }
+
+    const uint16_t degree = calc_degree_for_direction();
+#endif
+
     // Apply layer-based rotation transform.
     // Layer 0 = 0°, Layer 1 = 45°, ..., Layer 7 = 315°.
     // This allows the Nape to be held in 8 different orientations.
     int16_t x;
     int16_t y;
+
+#ifdef CONFIG_PMW3610_ALT_TRABO_SHIFT
+    rotate_point(raw_x, raw_y, degree, &x, &y);
+#else
     switch (last_orientation_layer) {
     case 1: // 45°
         x = ((raw_x + raw_y) * 100) / 141;
@@ -536,6 +777,7 @@ static int pmw3610_report_data(const struct device *dev) {
         y = raw_y;
         break;
     }
+#endif
 
     // Software post-rotation axis inversion.
     // Applied after the rotation transform, unlike the hardware inv_x/inv_y (pre-rotation).
@@ -660,6 +902,10 @@ static int pmw3610_init(const struct device *dev) {
         LOG_INF("Activating default orientation layer %d", config->default_orientation_layer);
         zmk_keymap_layer_activate(config->default_orientation_layer, false);
     }
+
+#ifdef CONFIG_PMW3610_ALT_TRABO_SHIFT
+    direction_degree = calc_step_angle_degree_in_range(CONFIG_PMW3610_ALT_TRABO_SHIFT_ANGLE);
+#endif
 
     // init trigger handler work
     k_work_init(&data->trigger_work, pmw3610_work_callback);
