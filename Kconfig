@@ -118,11 +118,11 @@ config PMW3610_ALT_TRABO_SHIFT_SAMPLE_TIME_MS
 
 config PMW3610_ALT_TRABO_SHIFT_DISTANCE_THRESHOLD
     int "Threshold of distance for TraboShift"
-    default 1000
+    default 800
 
 config PMW3610_ALT_TRABO_SHIFT_LAYER
     int "Layer to enable TraboShift"
-    default 12
+    default 11
 
 config PMW3610_ALT_TRABO_SHIFT_ANGLE
     int "Angle of each direction for TraboShift"
