@@ -133,11 +133,55 @@ ZMK Studio では以下の表記となります。Keymap Editorでは表示・�
 ### Nape起動時のdefault layerの設定方法
 
 driver変更に伴い、Nape起動時のdefault layerの設定方法が変更になっています。  
+
+#### `nape.overlay`ファイルを直接編集する場合
+
 `config/boards/shields/nape/nape.overlay` の `default-orientation-layer`を変更してください。  
 なお、その上に`snape-layers`がありますが、defaultの`11`はTraboShift用レイヤーと同じなので、使用したい場合は他の値にしてコメントを外してください。私は`12`にしています。
 
-[参考](https://github.com/karbou12/zmk-config-nape/blob/develop/config/boards/shields/nape/nape.overlay)
+`config/boards/shields/nape/nape.overlay`
+```c
+&spi0 {
+...
+    trackball: trackball@0 {
+...
+        // Snipe layers: uncomment and fill in layer numbers to enable snipe mode
+        // snipe-layers = <11>;
 
+        // Default orientation layer at boot (0 = 0°, 1 = 45°, ... 7 = 315°)
+        default-orientation-layer = <0>;
+    };
+```
+
+#### `nape.overlay`ファイルを直接編集せず、`nape.keymap`ファイルを編集したい場合
+
+まず、`nape.overlay`の`trackball_listener` にlabelを付けてください。これをしないとコンパイルエラーになります。
+
+`config/boards/shields/nape/nape.overlay`
+```diff
+/ {
+...
++    trackball_listener: trackball_listener0 {
+-    trackball_listener {
+...
+```
+
+その後、`nape.keymap`ファイルに以下を追加してください。
+
+`config/nape.keymap`
+```c
+&trackball {
+    snipe-layers = <12>; // snape-layerを使わないなら削除
+
+    // Default orientation layer at boot (0 = 0°, 1 = 45°, ... 7 = 315°)
+    default-orientation-layer = <6>; // 起動時に設定したいlayerに変更する
+};
+
+&trackball_listener {
+    compatible = "zmk,input-listener";
+    device = <&trackball>;
+};
+```
 
 ### RGBLEDの設定
 
@@ -166,10 +210,8 @@ CONFIG_RGBLED_WIDGET_LAYER_10_COLOR=3
 CONFIG_RGBLED_WIDGET_LAYER_11_COLOR=4
 # snipe: green
 CONFIG_RGBLED_WIDGET_LAYER_12_COLOR=2
-# space: magenta
+# tab: magenta
 CONFIG_RGBLED_WIDGET_LAYER_13_COLOR=5
-# mission: cyan
-CONFIG_RGBLED_WIDGET_LAYER_14_COLOR=6
 ```
 
 ---
