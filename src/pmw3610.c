@@ -661,7 +661,9 @@ static int pmw3610_report_data(const struct device *dev) {
 #ifdef CONFIG_PMW3610_ALT_TRABO_SHIFT
         if (current_layer != CONFIG_PMW3610_ALT_TRABO_SHIFT_LAYER) {
 #endif
-            last_orientation_layer = current_layer;
+            if (current_layer < 8) {
+                last_orientation_layer = current_layer;
+            }
 #ifdef CONFIG_PMW3610_ALT_TRABO_SHIFT
         }
 #endif
