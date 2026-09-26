@@ -13,6 +13,7 @@
 #include <zmk/keymap.h>
 #include <zmk/events/activity_state_changed.h>
 #include "pmw3610.h"
+#include <nape/pmw3610_runtime.h>
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(pmw3610, CONFIG_PMW3610_ALT_LOG_LEVEL);
@@ -104,7 +105,7 @@ static int pmw3610_set_cpi(const struct device *dev, uint32_t cpi,
      * :
      */
 
-    if ((cpi > PMW3610_MAX_CPI) || (cpi < PMW3610_MIN_CPI)) {
+    if ((cpi > PMW3610_MAX_CPI) || (cpi < PMW3610_MIN_CPI) || (cpi % 200)) {
         LOG_ERR("CPI value %u out of range", cpi);
         return -EINVAL;
     }
@@ -333,6 +334,7 @@ static int pmw3610_async_init_check_ob1(const struct device *dev) {
 
 static int pmw3610_async_init_configure(const struct device *dev) {
     int err = 0;
+    struct pixart_data *data = dev->data;
     const struct pixart_config *config = dev->config;
 
     // clear motion registers first (required in datasheet)
@@ -346,7 +348,7 @@ static int pmw3610_async_init_configure(const struct device *dev) {
     }
 
     if (!err) {
-        err = pmw3610_set_cpi(dev, config->cpi, config->swap_xy, config->inv_x, config->inv_y);
+        err = pmw3610_set_cpi(dev, atomic_get(&data->normal_cpi), config->swap_xy, config->inv_x, config->inv_y);
     }
 
     if (!err) {
@@ -458,12 +460,16 @@ static int pmw3610_report_data(const struct device *dev) {
     }
 
     // Switch CPI based on input mode
+    uint8_t layer_id = zmk_keymap_layer_index_to_id(current_layer);
+    uint32_t layer_cpi = layer_id < ARRAY_SIZE(data->layer_cpi)
+                         ? atomic_get(&data->layer_cpi[layer_id]) : 0;
     uint32_t target_cpi = (input_mode == SNIPE && config->snipe_cpi > 0)
                           ? config->snipe_cpi
-                          : config->cpi;
+                          : (layer_cpi ? layer_cpi : atomic_get(&data->normal_cpi));
     if (data->curr_cpi != target_cpi) {
-        pmw3610_set_cpi(dev, target_cpi, config->swap_xy, config->inv_x, config->inv_y);
-        data->curr_cpi = target_cpi;
+        if (!pmw3610_set_cpi(dev, target_cpi, config->swap_xy, config->inv_x, config->inv_y)) {
+            data->curr_cpi = target_cpi;
+        }
     }
 
     static int64_t dx = 0;
@@ -652,6 +658,11 @@ static int pmw3610_init(const struct device *dev) {
 
     // init CPI tracking to normal CPI
     data->curr_cpi = config->cpi;
+    atomic_set(&data->normal_cpi, config->cpi);
+    for (size_t i = 0; i < ARRAY_SIZE(data->layer_cpi); i++) {
+        atomic_set(&data->layer_cpi[i], 0);
+    }
+    data->boot_layer = config->default_orientation_layer;
 
     // Initialize orientation layer and optionally activate it in the keymap.
     // This lets the keyboard boot into a known physical orientation.
@@ -682,10 +693,69 @@ static int pmw3610_init(const struct device *dev) {
     return err;
 }
 
+int nape_pmw3610_set_cpi(const struct device *dev, uint16_t cpi) {
+    if (!dev || cpi < 200 || cpi > 3200 || cpi % 200) return -EINVAL;
+    struct pixart_data *data = dev->data;
+    atomic_set(&data->normal_cpi, cpi);
+    return 0;
+}
+
+uint16_t nape_pmw3610_get_cpi(const struct device *dev) {
+    return atomic_get(&((struct pixart_data *)dev->data)->normal_cpi);
+}
+
+uint16_t nape_pmw3610_stock_cpi(const struct device *dev) {
+    return ((const struct pixart_config *)dev->config)->cpi;
+}
+
+int nape_pmw3610_set_layer_cpi(const struct device *dev, uint8_t layer_id, uint16_t cpi) {
+    if (!dev || layer_id >= 32 || (cpi && (cpi < 200 || cpi > 3200 || cpi % 200))) return -EINVAL;
+    struct pixart_data *data = dev->data;
+    atomic_set(&data->layer_cpi[layer_id], cpi);
+    return 0;
+}
+
+uint16_t nape_pmw3610_get_layer_cpi(const struct device *dev, uint8_t layer_id) {
+    if (!dev || layer_id >= 32) return 0;
+    return atomic_get(&((struct pixart_data *)dev->data)->layer_cpi[layer_id]);
+}
+
+uint8_t nape_pmw3610_get_boot_layer(const struct device *dev) {
+    return ((struct pixart_data *)dev->data)->boot_layer;
+}
+
+uint8_t nape_pmw3610_stock_boot_layer(const struct device *dev) {
+    return ((const struct pixart_config *)dev->config)->default_orientation_layer;
+}
+
+int nape_pmw3610_set_boot_layer(const struct device *dev, uint8_t layer_id) {
+    if (!dev || layer_id >= 32) return -EINVAL;
+    ((struct pixart_data *)dev->data)->boot_layer = layer_id;
+    return 0;
+}
+
+int nape_pmw3610_apply_boot_layer(const struct device *dev) {
+    const uint8_t old_layer = nape_pmw3610_stock_boot_layer(dev);
+    const uint8_t boot_layer = nape_pmw3610_get_boot_layer(dev);
+    if (old_layer != boot_layer && old_layer != 0) {
+        zmk_keymap_layer_deactivate(old_layer, false);
+    }
+    if (boot_layer != 0 && old_layer != boot_layer) {
+        int ret = zmk_keymap_layer_activate(boot_layer, false);
+        if (ret < 0) return ret;
+    }
+    for (uint8_t index = 0; index < 8; index++) {
+        if (zmk_keymap_layer_index_to_id(index) == boot_layer) {
+            last_orientation_layer = index;
+            return 0;
+        }
+    }
+    return -EINVAL;
+}
+
 static int pmw3610_alt_attr_set(const struct device *dev, enum sensor_channel chan,
                             enum sensor_attribute attr, const struct sensor_value *val) {
     struct pixart_data *data = dev->data;
-    const struct pixart_config *config = dev->config;
     int err;
 
     if (unlikely(chan != SENSOR_CHAN_ALL)) {
@@ -699,11 +769,7 @@ static int pmw3610_alt_attr_set(const struct device *dev, enum sensor_channel ch
 
     switch ((uint32_t)attr) {
     case PMW3610_ALT_ATTR_CPI:
-        err = pmw3610_set_cpi(dev, PMW3610_SVALUE_TO_CPI(*val),
-                              config->swap_xy, config->inv_x, config->inv_y);
-        if (!err) {
-            data->curr_cpi = PMW3610_SVALUE_TO_CPI(*val);
-        }
+        err = nape_pmw3610_set_cpi(dev, PMW3610_SVALUE_TO_CPI(*val));
         break;
 
     case PMW3610_ALT_ATTR_RUN_DOWNSHIFT_TIME:

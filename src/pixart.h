@@ -10,6 +10,7 @@
 #include <zephyr/drivers/spi.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/sensor.h>
+#include <zephyr/sys/atomic.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -25,6 +26,9 @@ struct pixart_data {
 
     enum pixart_input_mode       curr_mode;  // current input mode (MOVE/SCROLL/SNIPE)
     uint32_t                     curr_cpi;   // current CPI (to avoid redundant writes)
+    atomic_t                     normal_cpi; // editable MOVE/SCROLL CPI; SNIPE keeps its own CPI
+    atomic_t                     layer_cpi[32]; // 0 inherits normal CPI, indexed by stable layer ID
+    uint8_t                      boot_layer; // selected starting orientation layer ID
 
     struct gpio_callback         irq_gpio_cb; // motion pin irq callback
     struct k_work                trigger_work; // real trigger job
