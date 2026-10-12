@@ -14,6 +14,9 @@
 #include <zmk/events/activity_state_changed.h>
 #include "pmw3610.h"
 #include <nape/pmw3610_runtime.h>
+#ifdef CONFIG_ZMK_TRACKBALL_SHIFT
+#include <zmk_trackball_shift/trackball_shift.h>
+#endif
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(pmw3610, CONFIG_PMW3610_ALT_LOG_LEVEL);
@@ -508,6 +511,14 @@ static int pmw3610_report_data(const struct device *dev) {
     // This allows the Nape to be held in 8 different orientations.
     int16_t x;
     int16_t y;
+
+#ifdef CONFIG_ZMK_TRACKBALL_SHIFT
+    if (tb_is_device_angle_changed()) {
+        x = raw_x;
+        y = raw_y;
+    } else {
+#endif
+
     switch (last_orientation_layer) {
     case 1: // 45°
         x = ((raw_x + raw_y) * 100) / 141;
@@ -542,6 +553,9 @@ static int pmw3610_report_data(const struct device *dev) {
         y = raw_y;
         break;
     }
+#ifdef CONFIG_ZMK_TRACKBALL_SHIFT
+    }
+#endif
 
     // Software post-rotation axis inversion.
     // Applied after the rotation transform, unlike the hardware inv_x/inv_y (pre-rotation).
@@ -671,6 +685,10 @@ static int pmw3610_init(const struct device *dev) {
         LOG_INF("Activating default orientation layer %d", config->default_orientation_layer);
         zmk_keymap_layer_activate(config->default_orientation_layer, false);
     }
+
+#ifdef CONFIG_ZMK_TRACKBALL_SHIFT
+    tb_init_device_angle_deg(last_orientation_layer * 45);
+#endif
 
     // init trigger handler work
     k_work_init(&data->trigger_work, pmw3610_work_callback);

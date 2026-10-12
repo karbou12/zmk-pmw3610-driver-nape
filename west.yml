@@ -1,0 +1,8 @@
+manifest:
+  remotes:
+    - name: karbou12
+      url-base: https://github.com/karbou12
+  projects:
+    - name: zmk-trackball-shift
+      remote: karbou12
+      revision: develop
