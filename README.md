@@ -1,5 +1,39 @@
 # PMW3610 driver implementation for ZMK
 
+## はじめに
+
+本リポジトリは、ZMK 0.4 (Zephyr 4.1) に対応したNapeオリジン用のPMW3610 driverリポジトリをForkして、Trackball Shift機能を搭載したものです。
+
+- **develop branch:** PMW3610 driverに直接trackball shift機能を搭載しています。Nape Console未確認です。詳細は[develop branchのREADME](https://github.com/karbou12/zmk-pmw3610-driver-nape/blob/develop/README.md)を確認してください。
+- **console/feature/trackball-shift branch:** 本branchです。[zmk-trackball-shift module](https://github.com/karbou12/zmk-trackball-shift)を使用するように変更しています。Nape Console確認済みです。以降はこちらの概要を説明します。
+
+## 機能概要
+
+Napeオリジンは8方向に向きを変えて使用できるトラックボールデバイスで、Layer毎に決められた向きが割り当てられています。  
+trackball shiftはLayerに依らず、向きを変更できる機能です。  
+Geminiによる[README](https://github.com/karbou12/zmk-trackball-shift)の要約は以下です。
+
+主な機能
+- **Trackball Shift Direction Detection (角度の自動検出):** 指定したキー(Behavior, Layer指定Input Processor)を押しながらトラックボールを上方向に転がすだけで、自動的にデバイスの向きを検出してくれます。
+<img width="722" height="229" alt="image" src="https://github.com/user-attachments/assets/d2ede6b8-7280-4771-8001-500246ca5d61" />
+
+- **動的な回転:** キー操作やロータリーエンコーダー（つまみ）を使って、リアルタイムにマウスの動きの角度を時計回り（CW）や反時計回り（CCW）に変えられます。
+<img width="719" height="376" alt="image" src="https://github.com/user-attachments/assets/8a31b308-764d-48b5-89e8-23e4384d7f2e" />
+
+- **固定の角度設定:** 「0度」「90度」「180度」といった決まった角度にワンタッチで切り替えられます。
+<img width="719" height="376" alt="image" src="https://github.com/user-attachments/assets/b945552d-fc3b-4b00-bfbe-2625ed44ac97" />
+
+- **リセット機能:** 設定した角度を初期状態に戻すことも可能です。
+<img width="719" height="224" alt="image" src="https://github.com/user-attachments/assets/f498ef5d-4edc-4f59-9e20-086bd651f91e" />
+
+
+詳細は[README](https://github.com/karbou12/zmk-trackball-shift)を参照してください。  
+設定方法は[README](https://github.com/karbou12/zmk-trackball-shift)と、私のNapeリポジトリの[console/feature/trackball-shift branchの実装](https://github.com/karbou12/zmk-config-nape/commit/693a0c85dc15c7359de524a253feae5a41f04be3)を参照してください。
+
+---
+
+以下、オリジナルのReadMe.
+
 This work is based on [ufan's zmk pixart sensor drivers](https://github.com/ufan/zmk/tree/support-trackpad), [inorichi's zmk-pmw3610-driver](https://github.com/inorichi/zmk-pmw3610-driver), and [Zephyr PMW3610 driver](https://github.com/zephyrproject-rtos/zephyr/blob/main/drivers/input/input_pmw3610.c).
 
 This driver had been tested on [my PMW3610 breakout board](https://github.com/badjeff/pmw3610-pcb).
