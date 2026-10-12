@@ -5,4 +5,4 @@ manifest:
   projects:
     - name: zmk-trackball-shift
       remote: karbou12
-      revision: develop
+      revision: main
